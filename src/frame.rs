@@ -7,9 +7,7 @@ use rand::Rng;
 
 use crate::Packet;
 
-const NUMBER_OF_BITS_TO_CHECK_FOR_PARITY_AT_ONCE: usize = 8;
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Frame {
     pub content: Vec<ByteWithParity>,
 }

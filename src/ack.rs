@@ -2,7 +2,7 @@ use rand::Rng;
 
 use crate::{ACK_VALUE, Packet};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ACK {
     content: u8,
 }

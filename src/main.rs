@@ -1,18 +1,20 @@
+use log;
 use rfd::FileDialog;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Display,
-    fs,
+    fs::{self},
     ops::Range,
-    path::Path,
-    str::FromStr,
-    time::{self, Duration},
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::{self, Duration, Instant},
 };
-use stopandwait::{Packet, ack::ACK, frame::Frame};
-
+use stopandwait::{Packet, PacketType, ack::ACK, frame::Frame, nack::NACK};
 const FOLDER_PREFIX: &str = "assets/";
-
+const FULL_PAYLOAD_LENGTH_IN_BYTES: usize = 240;
 #[derive(Debug)]
+#[allow(dead_code)]
 struct TransferResults {
     // When calculating, does not differentiate between full and small frames
     received_bytes: Vec<u8>,
@@ -46,11 +48,10 @@ impl Display for TransferResults {
     }
 }
 
-fn simulate_transfer(
+fn prepare_message(
     payload_to_transfer: &Vec<u8>,
     full_payload_length_in_bytes: usize,
-    bit_error_probability: f64,
-) -> TransferResults {
+) -> VecDeque<Frame> {
     assert!(full_payload_length_in_bytes % 8 == 0);
 
     let total_payload_length_in_bytes = payload_to_transfer.len();
@@ -85,14 +86,22 @@ fn simulate_transfer(
     for small_payload in small_frames_bytes.chunks(small_payload_length) {
         frames_to_be_transmitted.push_back(Frame::new(small_payload));
     }
+    frames_to_be_transmitted
 
-    let n_frames = frames_to_be_transmitted.len();
-
-    eprintln!(
+    /* eprintln!(
         "Sending {n_frames} frames with a full payload of {} bytes",
         full_payload_length_in_bytes
-    );
-
+    ); */
+}
+fn _simulate_transfer(
+    payload_to_transfer: &Vec<u8>,
+    full_payload_length_in_bytes: usize,
+    bit_error_probability: f64,
+) -> TransferResults {
+    let total_payload_length_in_bytes = payload_to_transfer.len();
+    let mut frames_to_be_transmitted =
+        prepare_message(payload_to_transfer, full_payload_length_in_bytes);
+    let n_frames = frames_to_be_transmitted.len();
     let mut rng = rand::rng();
     let mut total_tries: usize = 0;
     let mut total_time = Duration::ZERO;
@@ -213,7 +222,7 @@ fn _benchmark_payload_lengths(
     for full_payload_length_in_bytes in payload_range.step_by(byte_step) {
         results_map.insert(
             full_payload_length_in_bytes,
-            simulate_transfer(
+            _simulate_transfer(
                 &payload_to_transfer,
                 full_payload_length_in_bytes,
                 bit_error_probability,
@@ -228,7 +237,7 @@ fn _benchmark_payload_lengths(
 
     let best_speed = results_map
         .iter()
-        .max_by(|(k1, r1), (k2, r2)| r1.effective_speed.total_cmp(&r2.effective_speed))
+        .max_by(|(_k1, r1), (_k2, r2)| r1.effective_speed.total_cmp(&r2.effective_speed))
         .expect("I dont know how it could error");
 
     println!(
@@ -236,30 +245,180 @@ fn _benchmark_payload_lengths(
         best_speed.0, best_speed.1.effective_speed
     );
 }
+#[derive(Clone)]
+struct FileToTransfer {
+    path: PathBuf,
+    content: Vec<u8>,
+}
 
-#[tokio::main]
-async fn main() {
+impl FileToTransfer {
+    fn new(file_path: PathBuf) -> std::io::Result<Self> {
+        std::io::Result::Ok(Self {
+            content: fs::read(&file_path)?,
+            path: file_path,
+        })
+    }
+    fn extension(&self) -> String {
+        self.path
+            .extension()
+            .expect("File has no extensions")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+}
+
+fn ask_for_input_file_and_return_it() -> std::io::Result<FileToTransfer> {
     let input_file_path = FileDialog::new()
         .set_directory("~/Downloads")
         .pick_file()
         .expect("Did not pick any file!");
+
+    FileToTransfer::new(input_file_path)
+}
+
+fn main() {
+    let (tx_a_to_b, rx_a_to_b) = mpsc::channel();
+    let (tx_b_to_a, rx_b_to_a): (Sender<PacketType>, Receiver<PacketType>) = mpsc::channel();
+
+    const ACK: ACK = ACK::new();
+    const NACK: NACK = NACK::new();
+    /*
+    let (tx_A_to_TL, rx_A_to_TL) = mpsc::channel();
+    let (tx_TL_to_A, rx_TL_to_A) = mpsc::channel();
+    let (tx_B_to_TL, rx_B_to_TL) = mpsc::channel();
+    let (tx_TL_to_B, rx_TL_to_B) = mpsc::channel();
+    */
+    env_logger::init();
+
+    log::info!("Waiting for file input");
+    // Ask for input file
+    let file_to_transfer = ask_for_input_file_and_return_it().expect("Unable to read input file");
     // Read file extension
-    let file_extension = input_file_path.extension();
-    // Read payload into a vector of bytes
-    let payload_to_transfer = fs::read(&input_file_path).expect("Unable to find file");
+
+    let file_extension = file_to_transfer.extension();
+
+    // Setup transmission channels
+    let transmitter_thread = thread::spawn(move || {
+        let mut frames_to_transmit = prepare_message(
+            &file_to_transfer.clone().content,
+            FULL_PAYLOAD_LENGTH_IN_BYTES,
+        );
+
+        let mut frames_transmitted: usize = 1;
+        let total_number_of_frames_to_transmit = frames_to_transmit.len();
+        log::info!("Starting transmission");
+        while frames_to_transmit.len() > 0 {
+            let current_frame: Frame = frames_to_transmit
+                .front()
+                .expect("Already checked that the deque is not empty in the for loop")
+                .clone();
+            log::info!(
+                "Sending frame {}/{}",
+                frames_transmitted,
+                total_number_of_frames_to_transmit
+            );
+            tx_a_to_b
+                .send((current_frame, tx_b_to_a.clone(), time::Instant::now()))
+                .expect("Receveing end should not be closed");
+
+            let acknowledgement = rx_b_to_a.recv().unwrap();
+            log::debug!("Received acknowledgement package - Starting inspection");
+
+            if acknowledgement.is_valid() {
+                match acknowledgement {
+                    PacketType::ACK(_) => {
+                        log::debug!("Packet is a valid ACK - Moving on to next package");
+                        frames_transmitted += 1;
+                        frames_to_transmit.pop_front();
+                    }
+                    PacketType::NACK(_) => {
+                        log::debug!("Packet is a valid NACK - Retrying same package");
+                        continue;
+                    }
+
+                    _ => panic!("Should not be a Frame here"),
+                }
+            } else {
+                log::debug!("Acknowledgement package is invalid - Retrying same package");
+                continue;
+            }
+        }
+        log::info!("Finished transmission");
+    });
 
     // Define transfer parameters
-    let bit_error_probability = f64::powi(20.0, -2);
-    let _bytes_range = 24..=5000;
-    let _byte_step = 256;
+    let _bit_error_probability = f64::powi(20.0, -2);
+    // let _bytes_range = 24..=5000;
+    // let _byte_step = 256;
+    /*
+    let transmission_line_thread = thread::spawn(move || {
 
-    let result = simulate_transfer(&payload_to_transfer, 256, bit_error_probability);
-    println!("{}", result);
-    let output_file_string = FOLDER_PREFIX.to_owned()
-        + "received."
-        + file_extension.unwrap_or_default().to_str().expect("Bo");
-    let output_file_path = Path::new(&output_file_string);
+        loop {
+            let (transmitted_frame, )
+        }
+    });
 
-    // Write to output file
-    fs::write(output_file_path, result.received_bytes).expect("Failed to write to file");
+    */
+    let receiver_thread = thread::spawn(move || {
+        let mut received_frame_count: usize = 0;
+        let mut received_frames: Vec<Frame> = Vec::with_capacity(2 ^ 20);
+        loop {
+            let (received_frame, reply_tx, send_time) = match rx_a_to_b.recv() {
+                Ok(received) => received,
+                Err(_) => {
+                    log::info!(
+                        "Tx has closed channel, stopped receiving and closing Rx channel as well"
+                    );
+                    let mut received_bytes_vec =
+                        Vec::with_capacity(received_frames.len() * FULL_PAYLOAD_LENGTH_IN_BYTES);
+                    for received_frame in received_frames {
+                        received_bytes_vec.append(&mut received_frame.get_original_payload());
+                    }
+
+                    let output_file_string =
+                        FOLDER_PREFIX.to_owned() + "received." + &file_extension;
+                    let output_file_path = Path::new(&output_file_string);
+
+                    log::info!("Writing to output file");
+                    fs::write(output_file_path, received_bytes_vec)
+                        .expect("Failed to write to file");
+                    break;
+                    // Write to output file
+                }
+            };
+            log::debug!("Propagation time: {:?}", send_time.elapsed());
+            /*
+            log::debug!("Simulating propagation time on receveing end");
+            thread::sleep(Duration::from_millis(10));
+            */
+            let start_processing_time = Instant::now();
+            log::debug!("Received frame - now processing");
+            let is_received_frame_valid = received_frame.is_valid();
+            log::debug!(
+                "Received frame - finished processing, took {:?}",
+                start_processing_time.elapsed()
+            );
+
+            if is_received_frame_valid {
+                received_frame_count += 1;
+                received_frames.push(received_frame);
+                log::debug!("Sending ACK for packet {}", received_frame_count);
+                reply_tx.send(PacketType::ACK(ACK)).unwrap();
+            } else {
+                log::debug!("Sending NACK for packet {}", received_frame_count);
+                reply_tx.send(PacketType::NACK(NACK)).unwrap();
+            }
+        }
+    });
+
+    let cleaning_thread = std::thread::spawn(move || {
+        transmitter_thread.join().unwrap();
+        log::info!("Finished transmitting");
+
+        receiver_thread.join().unwrap();
+        log::info!("Finished receiving");
+    });
+
+    cleaning_thread.join().unwrap();
 }

@@ -2,7 +2,7 @@ use rand::Rng;
 
 use crate::{NACK_VALUE, Packet};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct NACK {
     content: u8,
 }
