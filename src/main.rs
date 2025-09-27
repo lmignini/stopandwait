@@ -6,13 +6,13 @@ use std::{
     fs::{self},
     ops::Range,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self},
     thread,
     time::{self, Duration, Instant},
 };
 use stopandwait::{Packet, PacketType, ack::ACK, frame::Frame, nack::NACK};
 const FOLDER_PREFIX: &str = "assets/";
-const FULL_PAYLOAD_LENGTH_IN_BYTES: usize = 240;
+const FULL_PAYLOAD_LENGTH_IN_BYTES: usize = 480;
 #[derive(Debug)]
 #[allow(dead_code)]
 struct TransferResults {
@@ -278,27 +278,27 @@ fn ask_for_input_file_and_return_it() -> std::io::Result<FileToTransfer> {
 }
 
 fn main() {
-    let (tx_a_to_b, rx_a_to_b) = mpsc::channel();
-    let (tx_b_to_a, rx_b_to_a): (Sender<PacketType>, Receiver<PacketType>) = mpsc::channel();
+    // let (tx_a_to_b, rx_a_to_b) = mpsc::channel();
+    // let (tx_b_to_a, rx_b_to_a): (Sender<PacketType>, Receiver<PacketType>) = mpsc::channel();
 
     const ACK: ACK = ACK::new();
     const NACK: NACK = NACK::new();
-    /*
-    let (tx_A_to_TL, rx_A_to_TL) = mpsc::channel();
-    let (tx_TL_to_A, rx_TL_to_A) = mpsc::channel();
-    let (tx_B_to_TL, rx_B_to_TL) = mpsc::channel();
-    let (tx_TL_to_B, rx_TL_to_B) = mpsc::channel();
-    */
+
+    let (tx_a_to_tl, rx_a_to_tl) = mpsc::channel();
+    let (tx_tl_to_a, rx_tl_to_a) = mpsc::channel();
+    let (tx_b_to_tl, rx_b_to_tl) = mpsc::channel();
+    let (tx_tl_to_b, rx_tl_to_b) = mpsc::channel();
+
     env_logger::init();
 
     log::info!("Waiting for file input");
+
     // Ask for input file
     let file_to_transfer = ask_for_input_file_and_return_it().expect("Unable to read input file");
     // Read file extension
-
     let file_extension = file_to_transfer.extension();
 
-    // Setup transmission channels
+    // TX thread
     let transmitter_thread = thread::spawn(move || {
         let mut frames_to_transmit = prepare_message(
             &file_to_transfer.clone().content,
@@ -318,12 +318,17 @@ fn main() {
                 frames_transmitted,
                 total_number_of_frames_to_transmit
             );
-            tx_a_to_b
-                .send((current_frame, tx_b_to_a.clone(), time::Instant::now()))
-                .expect("Receveing end should not be closed");
+            tx_a_to_tl
+                .send((current_frame, tx_tl_to_a.clone(), Instant::now()))
+                .expect("Channel TX to TL should not be closed");
 
-            let acknowledgement = rx_b_to_a.recv().unwrap();
-            log::debug!("Received acknowledgement package - Starting inspection");
+            let (acknowledgement, sent_time): (PacketType, Instant) = rx_tl_to_a
+                .recv()
+                .expect("Should get an acknowledgment for every sent frame");
+            log::debug!(
+                "Received acknowledgement package in {:?}- Starting inspection",
+                sent_time.elapsed()
+            );
 
             if acknowledgement.is_valid() {
                 match acknowledgement {
@@ -348,23 +353,56 @@ fn main() {
     });
 
     // Define transfer parameters
-    let _bit_error_probability = f64::powi(20.0, -2);
-    // let _bytes_range = 24..=5000;
-    // let _byte_step = 256;
-    /*
-    let transmission_line_thread = thread::spawn(move || {
+    let bit_error_probability = f64::powi(10.0, -4);
 
+    // TL thread
+    let transmission_line_thread = thread::spawn(move || {
+        let mut rng = rand::rng();
+        let mut corrupted_packets_delivered_counter: usize = 0;
         loop {
-            let (transmitted_frame, )
+            let (transmitted_frame, send_back_to_a_tx, send_instant) = match rx_a_to_tl.recv() {
+                Ok(received) => received,
+                Err(_) => {
+                    // Both TX and RX don't know this
+                    log::info!(
+                        "Number of corrupted packages accepted by RX: {}",
+                        corrupted_packets_delivered_counter
+                    );
+                    break;
+                    // Write to output file
+                }
+            };
+
+            let corrupted_frame =
+                transmitted_frame.simulate_errors_with_probability(bit_error_probability, &mut rng);
+
+            // Send corrupted packet to B
+            tx_tl_to_b
+                .send((corrupted_frame.clone(), tx_b_to_tl.clone(), send_instant))
+                .expect("Receiving channel should not be closed");
+
+            // Receive acknowledgement packet
+            let (transmitted_acknowledge, sent_time): (PacketType, Instant) =
+                rx_b_to_tl.recv().unwrap();
+
+            let corrupted_acknowledge = transmitted_acknowledge
+                .simulate_errors_with_probability(bit_error_probability, &mut rng);
+            if transmitted_frame != corrupted_frame && corrupted_acknowledge == PacketType::ACK(ACK)
+            {
+                corrupted_packets_delivered_counter += 1;
+            }
+            send_back_to_a_tx
+                .send((corrupted_acknowledge, sent_time))
+                .expect("Channel from TL to TX should not be closed");
         }
     });
 
-    */
+    // RX thread
     let receiver_thread = thread::spawn(move || {
         let mut received_frame_count: usize = 0;
         let mut received_frames: Vec<Frame> = Vec::with_capacity(2 ^ 20);
         loop {
-            let (received_frame, reply_tx, send_time) = match rx_a_to_b.recv() {
+            let (received_frame, reply_tx, send_instant) = match rx_tl_to_b.recv() {
                 Ok(received) => received,
                 Err(_) => {
                     log::info!(
@@ -387,13 +425,12 @@ fn main() {
                     // Write to output file
                 }
             };
-            log::debug!("Propagation time: {:?}", send_time.elapsed());
-            /*
-            log::debug!("Simulating propagation time on receveing end");
-            thread::sleep(Duration::from_millis(10));
-            */
+
+            log::debug!(
+                "Received frame in {:?} - Starting processing",
+                send_instant.elapsed()
+            );
             let start_processing_time = Instant::now();
-            log::debug!("Received frame - now processing");
             let is_received_frame_valid = received_frame.is_valid();
             log::debug!(
                 "Received frame - finished processing, took {:?}",
@@ -404,10 +441,14 @@ fn main() {
                 received_frame_count += 1;
                 received_frames.push(received_frame);
                 log::debug!("Sending ACK for packet {}", received_frame_count);
-                reply_tx.send(PacketType::ACK(ACK)).unwrap();
+                reply_tx
+                    .send((PacketType::ACK(ACK), Instant::now()))
+                    .unwrap();
             } else {
                 log::debug!("Sending NACK for packet {}", received_frame_count);
-                reply_tx.send(PacketType::NACK(NACK)).unwrap();
+                reply_tx
+                    .send((PacketType::NACK(NACK), Instant::now()))
+                    .unwrap();
             }
         }
     });
@@ -418,6 +459,8 @@ fn main() {
 
         receiver_thread.join().unwrap();
         log::info!("Finished receiving");
+
+        transmission_line_thread.join().unwrap();
     });
 
     cleaning_thread.join().unwrap();
