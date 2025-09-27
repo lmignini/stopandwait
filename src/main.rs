@@ -197,7 +197,7 @@ fn _simulate_transfer(
     let mut received_bytes_vec =
         Vec::with_capacity(received_frames.len() * full_payload_length_in_bytes);
     for received_frame in received_frames {
-        received_bytes_vec.append(&mut received_frame.get_original_payload());
+        received_bytes_vec.append(&mut received_frame.get_payload_and_checksum().0);
     }
     TransferResults {
         received_bytes: received_bytes_vec,
@@ -353,7 +353,7 @@ fn main() {
     });
 
     // Define transfer parameters
-    let bit_error_probability = f64::powi(10.0, -4);
+    let bit_error_probability = f64::powi(40.0, -2);
 
     // TL thread
     let transmission_line_thread = thread::spawn(move || {
@@ -411,7 +411,7 @@ fn main() {
                     let mut received_bytes_vec =
                         Vec::with_capacity(received_frames.len() * FULL_PAYLOAD_LENGTH_IN_BYTES);
                     for received_frame in received_frames {
-                        received_bytes_vec.append(&mut received_frame.get_original_payload());
+                        received_bytes_vec.append(&mut received_frame.get_payload_and_checksum().0);
                     }
 
                     let output_file_string =
