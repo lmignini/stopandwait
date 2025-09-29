@@ -10,9 +10,14 @@ use std::{
     thread,
     time::{self, Duration, Instant},
 };
-use stopandwait::{Packet, PacketType, ack::ACK, frame::Frame, nack::NACK};
+use stopandwait::packets::{
+    self, GenericPacket, Packet, SEQUENCE_ONE, SEQUENCE_ZERO,
+    acknowledgement::{GenericAcknowledgement, ack::ACK, nack::NACK},
+    flip_sequence_byte,
+    frame::Frame,
+};
 const FOLDER_PREFIX: &str = "assets/";
-const FULL_PAYLOAD_LENGTH_IN_BYTES: usize = 480;
+const FULL_PAYLOAD_LENGTH_IN_BYTES: usize = 5000;
 #[derive(Debug)]
 #[allow(dead_code)]
 struct TransferResults {
@@ -23,7 +28,7 @@ struct TransferResults {
     effective_speed: f64, // in kB / s
     average_rtt: f64,     // in ms
     average_tries: f64,
-    incorrect_packages: usize,
+    incorrect_packets: usize,
 }
 
 impl Display for TransferResults {
@@ -40,8 +45,8 @@ impl Display for TransferResults {
             self.average_tries
         ));
         result.push_str(&format!(
-            "Incorrect packages accepted: {}",
-            self.incorrect_packages
+            "Incorrect packets accepted: {}",
+            self.incorrect_packets
         ));
 
         write!(f, "{}", result)
@@ -79,13 +84,27 @@ fn prepare_message(
 
     let mut frames_to_be_transmitted: VecDeque<Frame> =
         VecDeque::with_capacity(n_full_frames + n_small_frames);
-
+    let mut current_sequence_byte = packets::SEQUENCE_ZERO;
     for full_payload in full_frames_bytes.chunks(full_payload_length_in_bytes) {
-        frames_to_be_transmitted.push_back(Frame::new(full_payload));
+        frames_to_be_transmitted.push_back(Frame::new(full_payload, current_sequence_byte));
+        current_sequence_byte = flip_sequence_byte(current_sequence_byte);
     }
     for small_payload in small_frames_bytes.chunks(small_payload_length) {
-        frames_to_be_transmitted.push_back(Frame::new(small_payload));
+        frames_to_be_transmitted.push_back(Frame::new(small_payload, current_sequence_byte));
+        current_sequence_byte = flip_sequence_byte(current_sequence_byte);
     }
+
+    let mut even_frames = frames_to_be_transmitted.iter().step_by(2);
+    let mut odd_frames = frames_to_be_transmitted.iter().skip(1).step_by(2);
+    assert!(
+        even_frames
+            .all(|frame| frame.get_payload_and_checksum_and_sequence_byte().2 == SEQUENCE_ZERO)
+    );
+    assert!(
+        odd_frames
+            .all(|frame| frame.get_payload_and_checksum_and_sequence_byte().2 == SEQUENCE_ONE)
+    );
+
     frames_to_be_transmitted
 
     /* eprintln!(
@@ -191,13 +210,17 @@ fn _simulate_transfer(
         total_tries as f64 / n_frames as f64
     );
 
-    println!("Incorrect packages accepted: {}", wrong_received_packets);
+    println!("Incorrect packets accepted: {}", wrong_received_packets);
 
     */
     let mut received_bytes_vec =
         Vec::with_capacity(received_frames.len() * full_payload_length_in_bytes);
     for received_frame in received_frames {
-        received_bytes_vec.append(&mut received_frame.get_payload_and_checksum().0);
+        received_bytes_vec.append(
+            &mut received_frame
+                .get_payload_and_checksum_and_sequence_byte()
+                .0,
+        );
     }
     TransferResults {
         received_bytes: received_bytes_vec,
@@ -208,7 +231,7 @@ fn _simulate_transfer(
             / 1000.0,
         average_rtt: total_time.as_secs_f64() as f64 / n_frames as f64 * 1000.0,
         average_tries: total_tries as f64 / n_frames as f64,
-        incorrect_packages: wrong_received_packets,
+        incorrect_packets: wrong_received_packets,
     }
 }
 
@@ -281,8 +304,10 @@ fn main() {
     // let (tx_a_to_b, rx_a_to_b) = mpsc::channel();
     // let (tx_b_to_a, rx_b_to_a): (Sender<PacketType>, Receiver<PacketType>) = mpsc::channel();
 
-    const ACK: ACK = ACK::new();
-    const NACK: NACK = NACK::new();
+    const ACK_ZERO: ACK = ACK::new(SEQUENCE_ZERO);
+    const ACK_ONE: ACK = ACK::new(SEQUENCE_ONE);
+    const NACK_ZERO: NACK = NACK::new(SEQUENCE_ZERO);
+    const NACK_ONE: NACK = NACK::new(SEQUENCE_ONE);
 
     let (tx_a_to_tl, rx_a_to_tl) = mpsc::channel();
     let (tx_tl_to_a, rx_tl_to_a) = mpsc::channel();
@@ -295,15 +320,18 @@ fn main() {
 
     // Ask for input file
     let file_to_transfer = ask_for_input_file_and_return_it().expect("Unable to read input file");
+    let cloned_content = file_to_transfer.content.clone();
     // Read file extension
     let file_extension = file_to_transfer.extension();
-
+    let not_passed_file_extension = file_extension.clone();
     // TX thread
     let transmitter_thread = thread::spawn(move || {
         let mut frames_to_transmit = prepare_message(
             &file_to_transfer.clone().content,
             FULL_PAYLOAD_LENGTH_IN_BYTES,
         );
+
+        let mut expected_sequence_byte = SEQUENCE_ONE;
 
         let mut frames_transmitted: usize = 1;
         let total_number_of_frames_to_transmit = frames_to_transmit.len();
@@ -322,30 +350,39 @@ fn main() {
                 .send((current_frame, tx_tl_to_a.clone(), Instant::now()))
                 .expect("Channel TX to TL should not be closed");
 
-            let (acknowledgement, sent_time): (PacketType, Instant) = rx_tl_to_a
+            let (acknowledgement, sent_time): (GenericPacket, Instant) = rx_tl_to_a
                 .recv()
                 .expect("Should get an acknowledgment for every sent frame");
             log::debug!(
-                "Received acknowledgement package in {:?}- Starting inspection",
+                "Received acknowledgement packet in {:?}- Starting inspection",
                 sent_time.elapsed()
             );
 
             if acknowledgement.is_valid() {
                 match acknowledgement {
-                    PacketType::ACK(_) => {
-                        log::debug!("Packet is a valid ACK - Moving on to next package");
-                        frames_transmitted += 1;
-                        frames_to_transmit.pop_front();
+                    GenericPacket::Acknowledgement(GenericAcknowledgement::ACK(ack)) => {
+                        if ack.get_ack_and_sequence_byte().1 == expected_sequence_byte {
+                            log::debug!("Packet is a valid ACK - Moving on to next packet");
+                            frames_transmitted += 1;
+                            frames_to_transmit.pop_front();
+                            expected_sequence_byte = flip_sequence_byte(expected_sequence_byte);
+                        } else {
+                            log::debug!("Received duplicate ACK, discarding it silently...");
+                            continue;
+                        }
                     }
-                    PacketType::NACK(_) => {
-                        log::debug!("Packet is a valid NACK - Retrying same package");
+                    GenericPacket::Acknowledgement(GenericAcknowledgement::NACK(nack)) => {
+                        if nack.get_ack_and_sequence_byte().1 == expected_sequence_byte {
+                            log::debug!("Received duplicate NACK, discarding it silently...");
+                        }
+                        log::debug!("Packet is a valid NACK - Retrying same packet");
                         continue;
                     }
 
                     _ => panic!("Should not be a Frame here"),
                 }
             } else {
-                log::debug!("Acknowledgement package is invalid - Retrying same package");
+                log::debug!("Acknowledgement packet is invalid - Retrying same packet");
                 continue;
             }
         }
@@ -353,7 +390,7 @@ fn main() {
     });
 
     // Define transfer parameters
-    let bit_error_probability = f64::powi(40.0, -2);
+    let bit_error_probability = f64::powi(10.0, -9);
 
     // TL thread
     let transmission_line_thread = thread::spawn(move || {
@@ -365,7 +402,7 @@ fn main() {
                 Err(_) => {
                     // Both TX and RX don't know this
                     log::info!(
-                        "Number of corrupted packages accepted by RX: {}",
+                        "Number of corrupted packets accepted by RX: {}",
                         corrupted_packets_delivered_counter
                     );
                     break;
@@ -382,15 +419,24 @@ fn main() {
                 .expect("Receiving channel should not be closed");
 
             // Receive acknowledgement packet
-            let (transmitted_acknowledge, sent_time): (PacketType, Instant) =
+            let (transmitted_acknowledge, sent_time): (GenericPacket, Instant) =
                 rx_b_to_tl.recv().unwrap();
-
+            /*
+            if transmitted_frame != corrupted_frame {
+                assert_eq!(corrupted_frame.is_valid(), false);
+            }
+             */
             let corrupted_acknowledge = transmitted_acknowledge
                 .simulate_errors_with_probability(bit_error_probability, &mut rng);
-            if transmitted_frame != corrupted_frame && corrupted_acknowledge == PacketType::ACK(ACK)
+            /*
+            if transmitted_frame != corrupted_frame
+                && corrupted_acknowledge
+                    == GenericPacket::Acknowledgement(GenericAcknowledgement::ACK(ACK))
             {
+
                 corrupted_packets_delivered_counter += 1;
             }
+            */
             send_back_to_a_tx
                 .send((corrupted_acknowledge, sent_time))
                 .expect("Channel from TL to TX should not be closed");
@@ -401,6 +447,9 @@ fn main() {
     let receiver_thread = thread::spawn(move || {
         let mut received_frame_count: usize = 0;
         let mut received_frames: Vec<Frame> = Vec::with_capacity(2 ^ 20);
+        let mut current_expected_package = SEQUENCE_ZERO;
+        let mut current_ack_with_next_expected_package = ACK_ZERO;
+
         loop {
             let (received_frame, reply_tx, send_instant) = match rx_tl_to_b.recv() {
                 Ok(received) => received,
@@ -411,7 +460,11 @@ fn main() {
                     let mut received_bytes_vec =
                         Vec::with_capacity(received_frames.len() * FULL_PAYLOAD_LENGTH_IN_BYTES);
                     for received_frame in received_frames {
-                        received_bytes_vec.append(&mut received_frame.get_payload_and_checksum().0);
+                        received_bytes_vec.append(
+                            &mut received_frame
+                                .get_payload_and_checksum_and_sequence_byte()
+                                .0,
+                        );
                     }
 
                     let output_file_string =
@@ -433,21 +486,62 @@ fn main() {
             let start_processing_time = Instant::now();
             let is_received_frame_valid = received_frame.is_valid();
             log::debug!(
-                "Received frame - finished processing, took {:?}",
-                start_processing_time.elapsed()
+                "Received frame - finished processing, took {:?} - Valid {}",
+                start_processing_time.elapsed(),
+                is_received_frame_valid
             );
 
             if is_received_frame_valid {
-                received_frame_count += 1;
-                received_frames.push(received_frame);
-                log::debug!("Sending ACK for packet {}", received_frame_count);
-                reply_tx
-                    .send((PacketType::ACK(ACK), Instant::now()))
-                    .unwrap();
+                if received_frame
+                    .get_payload_and_checksum_and_sequence_byte()
+                    .2
+                    == current_expected_package
+                {
+                    current_expected_package = flip_sequence_byte(current_expected_package);
+                    current_ack_with_next_expected_package = ACK::new(current_expected_package);
+                    received_frame_count += 1;
+                    received_frames.push(received_frame);
+                    log::debug!(
+                        "Sending ACK {} for packet {}",
+                        current_expected_package,
+                        received_frame_count
+                    );
+                    reply_tx
+                        .send((
+                            GenericPacket::Acknowledgement(GenericAcknowledgement::ACK(
+                                current_ack_with_next_expected_package,
+                            )),
+                            Instant::now(),
+                        ))
+                        .unwrap();
+                } else {
+                    log::debug!("Received duplicate frame, discarding it silently...");
+                    log::debug!(
+                        "Sending ACK {} for packet {}",
+                        current_expected_package,
+                        received_frame_count
+                    );
+                    reply_tx
+                        .send((
+                            GenericPacket::Acknowledgement(GenericAcknowledgement::ACK(
+                                current_ack_with_next_expected_package,
+                            )),
+                            Instant::now(),
+                        ))
+                        .unwrap();
+                }
             } else {
+                let received_sequence_byte = received_frame
+                    .get_payload_and_checksum_and_sequence_byte()
+                    .2;
                 log::debug!("Sending NACK for packet {}", received_frame_count);
                 reply_tx
-                    .send((PacketType::NACK(NACK), Instant::now()))
+                    .send((
+                        GenericPacket::Acknowledgement(GenericAcknowledgement::NACK(NACK::new(
+                            received_sequence_byte,
+                        ))),
+                        Instant::now(),
+                    ))
                     .unwrap();
             }
         }
@@ -461,6 +555,14 @@ fn main() {
         log::info!("Finished receiving");
 
         transmission_line_thread.join().unwrap();
+
+        log::info!("Asserting that input file is equal to output file");
+        assert_eq!(
+            cloned_content,
+            fs::read(FOLDER_PREFIX.to_owned() + "received." + &not_passed_file_extension).unwrap()
+        );
+
+        log::info!("Successful transfer");
     });
 
     cleaning_thread.join().unwrap();

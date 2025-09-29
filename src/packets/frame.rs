@@ -3,10 +3,8 @@ use std::{
     fmt::{self, Display},
 };
 
+use crate::packets::{Packet, SEQUENCE_ZERO, SequenceByte};
 use rand::Rng;
-
-use crate::Packet;
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct Frame {
     pub content: Vec<u8>,
@@ -52,40 +50,47 @@ impl ByteWithParity {
     }
 }
 */
-pub fn checksum(msg: &[u8]) -> u16 {
-    let mut crc: u16 = 0xffff;
-    for byte in msg.iter() {
-        let mut x = (*byte as u16) ^ (crc & 0xff);
-        x ^= (x & 0x0f) << 4;
-        crc = ((x << 8) | (crc >> 8)) ^ (x >> 4) ^ (x << 3);
-    }
-    crc
+pub fn checksum(msg: &[u8]) -> u32 {
+    crc32fast::hash(msg)
 }
 
 pub fn flip_bit_in_u8(byte: &u8, i: u8) -> u8 {
     byte ^ 1u8 << i
 }
 impl Frame {
-    pub fn new(payload_data: &[u8]) -> Self {
-        let mut payload_with_checksum: Vec<u8> = Vec::with_capacity(payload_data.len() + 2);
+    pub fn new(payload_data: &[u8], sequence_byte: SequenceByte) -> Self {
+        let mut complete_payload: Vec<u8> = Vec::with_capacity(payload_data.len() + 2);
         for &byte in payload_data {
-            payload_with_checksum.push(byte);
+            complete_payload.push(byte);
         }
 
         let checksum_in_bytes = checksum(payload_data).to_be_bytes();
-        payload_with_checksum.push(checksum_in_bytes[0]);
-        payload_with_checksum.push(checksum_in_bytes[1]);
+        for checksum_byte in checksum_in_bytes {
+            complete_payload.push(checksum_byte);
+        }
+
+        complete_payload.push(sequence_byte);
         Self {
-            content: payload_with_checksum,
+            content: complete_payload,
         }
     }
-    pub fn get_payload_and_checksum(&self) -> (Vec<u8>, u16) {
-        let (payload, checksum) = self
+    pub fn get_payload_and_checksum_and_sequence_byte(&self) -> (Vec<u8>, u32, SequenceByte) {
+        let (payload, checksum_and_sequence_byte) = self
             .content
-            .split_last_chunk::<2>()
-            .unwrap_or((&[], &[0, 0]));
+            .split_last_chunk::<5>()
+            .unwrap_or((&[], &[0, 0, 0, 0, SEQUENCE_ZERO]));
 
-        (payload.to_vec(), u16::from_be_bytes(*checksum))
+        let (checksum, sequence): (u32, SequenceByte) = (
+            u32::from_be_bytes([
+                checksum_and_sequence_byte[0],
+                checksum_and_sequence_byte[1],
+                checksum_and_sequence_byte[2],
+                checksum_and_sequence_byte[3],
+            ]),
+            *checksum_and_sequence_byte.last().unwrap() as SequenceByte,
+        );
+
+        (payload.to_vec(), checksum, sequence)
     }
 }
 
@@ -109,11 +114,12 @@ impl Packet for Frame {
         }
     }
     fn is_valid(&self) -> bool {
-        let (received_payload, received_checksum) = self.get_payload_and_checksum();
+        let (received_payload, received_checksum, _received_sequence) =
+            self.get_payload_and_checksum_and_sequence_byte();
 
         let computed_checksum = checksum(&received_payload);
-
-        return received_checksum == computed_checksum;
+        let is_valid = received_checksum == computed_checksum;
+        return is_valid;
     }
 }
 
@@ -140,10 +146,10 @@ fn error_detection_encoding_is_applied_correctly() {
     let b1: u8 = 10;
     let b2: u8 = 201;
 
-    let frame = Frame::new(&[b1, b2]);
+    // let frame = Frame::new(&[b1, b2]);
 
-    println!("{:08b} -> {:08b}", b1, flip_bit_in_u8(&b1, 1));
-    println!("{:08b} -> {:08b}", b2, flip_bit_in_u8(&b2, 3));
+    // println!("{:08b} -> {:08b}", b1, flip_bit_in_u8(&b1, 1));
+    // println!("{:08b} -> {:08b}", b2, flip_bit_in_u8(&b2, 3));
 
-    println!("{}", frame);
+    // println!("{}", frame);
 }
