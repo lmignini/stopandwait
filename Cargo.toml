@@ -10,6 +10,7 @@ log = "0.4.28"
 env_logger = "0.11.8"
 crc32fast = "1.5"
 clap = { version = "4.5.48", features = ["derive"] }
+wayland-sys = { version = "0.31", features = ["dlopen"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
