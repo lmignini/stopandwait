@@ -6,19 +6,20 @@ use std::{
     net::{Ipv4Addr, UdpSocket},
     path::PathBuf,
     str::FromStr,
-    time::Duration,
 };
 
 use clap::Command;
 use stopandwait::{
     EOF_MARKER, EOT_MARKER, PAYLOAD_SIZE, RX_PORT, TIMEOUT_DURATION, TX_PORT,
-    build_len_prefixed_payload,
     packets::{Packet, SEQUENCE_ONE, acknowledgement::ack::ACK, frame::Frame},
     parse_len_prefixed_payload,
 };
 
 fn main() {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug)
+        .format_target(true)
+        .init();
     let matches = Command::new("rx")
         .arg(
             arg!(--ip <VALUE>)
@@ -34,7 +35,7 @@ fn main() {
     tx_ip_string.push(':');
     tx_ip_string.push_str(TX_PORT);
 
-    let mut rng = rand::rng();
+    // let mut rng = rand::rng();
     let socket = UdpSocket::bind(format!("0.0.0.0:{RX_PORT}")).unwrap();
 
     log::info!("Binding on socket {:?}", socket);

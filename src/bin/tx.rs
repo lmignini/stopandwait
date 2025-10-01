@@ -1,14 +1,5 @@
-use core::time;
-use rand::rng;
 use rfd::FileDialog;
-use std::{
-    collections::VecDeque,
-    ffi::OsStr,
-    fs,
-    net::UdpSocket,
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, ffi::OsStr, fs, net::UdpSocket, path::PathBuf};
 use stopandwait::{
     BIT_ERROR_PROBABILITY, EOF_MARKER, EOT_MARKER, MAX_DATA_SIZE, PAYLOAD_SIZE, RX_PORT,
     TIMEOUT_DURATION, TX_PORT, build_len_prefixed_payload,
@@ -35,14 +26,7 @@ impl FileToTransfer {
             path: file_path,
         })
     }
-    fn extension(&self) -> String {
-        self.path
-            .extension()
-            .expect("File has no extensions")
-            .to_str()
-            .unwrap()
-            .to_string()
-    }
+
     fn filename_with_extension(&self) -> &OsStr {
         self.path.file_name().unwrap()
     }
@@ -169,7 +153,10 @@ fn prepare_message(file_to_transfer: &FileToTransfer) -> VecDeque<Frame> {
     ); */
 }
 fn main() {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug)
+        .format_target(true)
+        .init();
 
     let matches = Command::new("tx")
         .arg(
@@ -198,10 +185,7 @@ fn main() {
     let file_to_transfer = ask_for_input_file_and_return_it().expect("Unable to read input file");
 
     log::info!("File size is {} bytes", file_to_transfer.content.len());
-    let cloned_content = file_to_transfer.content.clone();
-    // Read file extension
-    let file_extension = file_to_transfer.extension();
-    // let not_passed_file_extension = file_extension.clone();
+
     let mut frames_to_send: VecDeque<Frame> = prepare_message(&file_to_transfer);
 
     let n_frames = frames_to_send.len();
@@ -222,7 +206,7 @@ fn main() {
         log::debug!("Listening for ACK");
         // Wait for ACK bytes
         loop {
-            let start_time = Instant::now();
+            let start_time = std::time::Instant::now();
             match socket.recv(&mut received_ack_bytes) {
                 Ok(_) => {
                     break; // got ACK

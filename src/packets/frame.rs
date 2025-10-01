@@ -146,16 +146,3 @@ impl Display for ByteWithParity {
     }
 }
     */
-
-#[test]
-fn error_detection_encoding_is_applied_correctly() {
-    let b1: u8 = 10;
-    let b2: u8 = 201;
-
-    // let frame = Frame::new(&[b1, b2]);
-
-    // println!("{:08b} -> {:08b}", b1, flip_bit_in_u8(&b1, 1));
-    // println!("{:08b} -> {:08b}", b2, flip_bit_in_u8(&b2, 3));
-
-    // println!("{}", frame);
-}
