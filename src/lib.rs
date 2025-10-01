@@ -1,16 +1,18 @@
+use log::LevelFilter;
+
 pub mod packets;
 
 pub const RX_PORT: &str = "5000";
 pub const TX_PORT: &str = "4000";
-pub const PAYLOAD_SIZE: usize = 240;
+pub const PAYLOAD_SIZE: usize = 960 * 2 * 2;
 const LEN_BYTES: usize = 2;
 
 pub const MAX_DATA_SIZE: usize = PAYLOAD_SIZE - LEN_BYTES;
 pub const BIT_ERROR_PROBABILITY: f64 = 0.000001;
 pub const EOF_MARKER: &[u8] = b"__EOF__";
 pub const EOT_MARKER: &[u8] = b"__EOT__";
-
-pub const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
+pub const FILTER_LEVEL: LevelFilter = log::LevelFilter::Info;
+pub const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(2);
 
 /*
 pub fn extend_payload_to_fixed_size(payload: &[u8]) -> [u8; PAYLOAD_SIZE] {
@@ -29,7 +31,7 @@ pub fn extend_payload_to_fixed_size(payload: &[u8]) -> [u8; PAYLOAD_SIZE] {
 pub fn build_len_prefixed_payload(data: &[u8]) -> [u8; PAYLOAD_SIZE] {
     assert!(
         data.len() <= MAX_DATA_SIZE,
-        "Dats is too big for length-prefixed payload"
+        "Data is too big for length-prefixed payload"
     );
     let mut out = [0u8; PAYLOAD_SIZE];
     let len = data.len() as u16;

@@ -10,14 +10,15 @@ use std::{
 
 use clap::Command;
 use stopandwait::{
-    EOF_MARKER, EOT_MARKER, PAYLOAD_SIZE, RX_PORT, TIMEOUT_DURATION, TX_PORT,
-    packets::{Packet, SEQUENCE_ONE, acknowledgement::ack::ACK, frame::Frame},
+    BIT_ERROR_PROBABILITY, EOF_MARKER, EOT_MARKER, FILTER_LEVEL, PAYLOAD_SIZE, RX_PORT,
+    TIMEOUT_DURATION, TX_PORT,
+    packets::{Packet, SEQUENCE_ONE, SEQUENCE_ZERO, acknowledgement::ack::ACK, frame::Frame},
     parse_len_prefixed_payload,
 };
 
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(FILTER_LEVEL)
         .format_target(true)
         .init();
     let matches = Command::new("rx")
@@ -35,7 +36,7 @@ fn main() {
     tx_ip_string.push(':');
     tx_ip_string.push_str(TX_PORT);
 
-    // let mut rng = rand::rng();
+    let mut rng = rand::rng();
     let socket = UdpSocket::bind(format!("0.0.0.0:{RX_PORT}")).unwrap();
 
     log::info!("Binding on socket {:?}", socket);
@@ -49,10 +50,11 @@ fn main() {
     let mut received_checksum: u32 = 0;
     let mut received_filename = OsStr::new("received").to_owned();
     let mut n_received_packets: usize = 1;
+    let mut expected_sequence_byte;
 
     loop {
         loop {
-            log::debug!("Listening for Frame");
+            log::debug!("Listening for frame");
             if socket.recv(&mut buf).is_ok() {
                 break;
             }
@@ -62,51 +64,74 @@ fn main() {
 
         let frame = Frame::from_bytes(&buf);
 
+        if (n_received_packets - 1) % 2 == 0 {
+            expected_sequence_byte = SEQUENCE_ZERO;
+        } else {
+            expected_sequence_byte = SEQUENCE_ONE;
+        }
+
         if frame.is_valid() {
             assert!(!(waiting_for_checksum && waiting_for_filename));
             log::debug!("Received frame is valid!");
-            let prefixed_payload = frame.get_payload_and_checksum_and_sequence_byte().0;
-            let parsed_payload = parse_len_prefixed_payload(&prefixed_payload);
-            if waiting_for_checksum == false && waiting_for_filename == false {
-                if parsed_payload != EOF_MARKER && parsed_payload != EOT_MARKER {
-                    received_data.extend_from_slice(parsed_payload);
-                }
-            } else if waiting_for_filename {
-                log::info!("-- Received Filename frame --");
-                received_filename =
-                    unsafe { OsStr::from_encoded_bytes_unchecked(parsed_payload).to_owned() };
-                waiting_for_filename = false;
-            } else if waiting_for_checksum {
-                log::info!("-- Received Checksum frame --");
-                received_checksum = u32::from_be_bytes(*parsed_payload.first_chunk::<4>().unwrap());
-                dbg!(received_checksum);
-                waiting_for_checksum = false;
-                waiting_for_filename = true;
-            }
-            n_received_packets += 1;
-            match parsed_payload {
-                EOT_MARKER => log::info!("-- Received EOT marker --"),
-                EOF_MARKER => {
-                    log::info!("-- Received EOF marker, waiting for checksum frame --");
-                    waiting_for_checksum = true;
-                }
-                _ => (),
-            }
 
-            log::debug!("Sending ACK");
-            let ack = ACK::new(SEQUENCE_ONE);
-            socket.send(&ack.to_bytes()).unwrap();
+            let (prefixed_payload, _, received_sequence_byte) =
+                frame.get_payload_and_checksum_and_sequence_byte();
 
-            if parsed_payload == EOT_MARKER {
-                // Wait for timeout
-                socket
-                    .set_read_timeout(Some(time::Duration::from_secs(2) + TIMEOUT_DURATION))
-                    .unwrap();
+            if (expected_sequence_byte) == (received_sequence_byte) {
+                // Received correctly sequenced frame
 
-                if socket.recv(&mut buf).is_err() {
-                    log::info!("TX has stopped transmission, closing RX socket");
-                    break;
+                let parsed_payload = parse_len_prefixed_payload(&prefixed_payload);
+                if waiting_for_checksum == false && waiting_for_filename == false {
+                    if parsed_payload != EOF_MARKER && parsed_payload != EOT_MARKER {
+                        received_data.extend_from_slice(parsed_payload);
+                    }
+                } else if waiting_for_filename {
+                    log::info!("-- Received Filename frame --");
+                    received_filename =
+                        unsafe { OsStr::from_encoded_bytes_unchecked(parsed_payload).to_owned() };
+                    waiting_for_filename = false;
+                } else if waiting_for_checksum {
+                    log::info!("-- Received Checksum frame --");
+                    received_checksum =
+                        u32::from_be_bytes(*parsed_payload.first_chunk::<4>().unwrap());
+
+                    waiting_for_checksum = false;
+                    waiting_for_filename = true;
                 }
+
+                let ack = ACK::new((n_received_packets % 2) as u8);
+                if received_sequence_byte != ((n_received_packets % 2) as u8) { // 
+                }
+                n_received_packets += 1;
+                match parsed_payload {
+                    EOT_MARKER => log::info!("-- Received EOT marker --"),
+                    EOF_MARKER => {
+                        log::info!("-- Received EOF marker, waiting for checksum frame --");
+                        waiting_for_checksum = true;
+                    }
+                    _ => (),
+                }
+
+                log::debug!("Sending ACK for frame {}", n_received_packets);
+                let ack_to_send =
+                    ack.simulate_errors_with_probability(BIT_ERROR_PROBABILITY, &mut rng);
+                socket.send(&ack_to_send.to_bytes()).unwrap();
+
+                if parsed_payload == EOT_MARKER {
+                    // Wait for timeout
+                    socket
+                        .set_read_timeout(Some(time::Duration::from_secs(1) + TIMEOUT_DURATION))
+                        .unwrap();
+
+                    if socket.recv(&mut buf).is_err() {
+                        log::info!("TX has stopped transmission, closing RX socket");
+                        break;
+                    }
+                }
+            } else {
+                // Received duplicate frame
+
+                log::warn!("Received duplicate frame, discarding it silently...");
             }
         } else {
             log::warn!("Received frame is NOT valid! - Doing nothing, waiting for timeout");
@@ -118,8 +143,15 @@ fn main() {
     log::info!("Received {} bytes of data", received_data.len());
 
     // log::info!("{:x?}", received_data);
-    assert_eq!(received_checksum, computed_checksum);
-    log::info!("Computer checksum: {computed_checksum}");
+    if received_checksum != computed_checksum {
+        log::error!(
+            "!! The received checksum is different from the computed one, received data is corrupted !!"
+        )
+    }
+
+    log::info!(
+        "-- Computed checksum: {computed_checksum} Received checksum: {received_checksum} --"
+    );
     const RECEIVED_DIRECTORY_PATH: &'static str = "received/";
     fs::create_dir_all(RECEIVED_DIRECTORY_PATH).expect("Failed to create directory");
     let mut output_file_path = PathBuf::from_str(RECEIVED_DIRECTORY_PATH).unwrap();

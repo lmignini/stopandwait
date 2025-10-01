@@ -1,8 +1,8 @@
 use rfd::FileDialog;
-use std::{collections::VecDeque, ffi::OsStr, fs, net::UdpSocket, path::PathBuf};
+use std::{collections::VecDeque, ffi::OsStr, fs, net::UdpSocket, path::PathBuf, thread};
 use stopandwait::{
-    BIT_ERROR_PROBABILITY, EOF_MARKER, EOT_MARKER, MAX_DATA_SIZE, PAYLOAD_SIZE, RX_PORT,
-    TIMEOUT_DURATION, TX_PORT, build_len_prefixed_payload,
+    BIT_ERROR_PROBABILITY, EOF_MARKER, EOT_MARKER, FILTER_LEVEL, MAX_DATA_SIZE, PAYLOAD_SIZE,
+    RX_PORT, TIMEOUT_DURATION, TX_PORT, build_len_prefixed_payload,
     packets::{
         Packet, SEQUENCE_ONE, SEQUENCE_ZERO, acknowledgement::ack::ACK, flip_sequence_byte,
         frame::Frame,
@@ -154,7 +154,7 @@ fn prepare_message(file_to_transfer: &FileToTransfer) -> VecDeque<Frame> {
 }
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(FILTER_LEVEL)
         .format_target(true)
         .init();
 
@@ -247,7 +247,9 @@ fn main() {
             continue;
         } else {
             // Invalid ACK;
-            todo!()
+            log::warn!("Received invalid ACK - Timing out");
+            thread::sleep(TIMEOUT_DURATION);
+            continue;
         }
     }
     // log::info!("{:x?}", file_to_transfer.content);
