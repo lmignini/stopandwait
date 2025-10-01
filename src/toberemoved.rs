@@ -1,3 +1,4 @@
+/*
 use log;
 use rfd::FileDialog;
 use std::{
@@ -567,3 +568,4 @@ fn main() {
 
     cleaning_thread.join().unwrap();
 }
+*/
