@@ -2,8 +2,8 @@ use log::LevelFilter;
 
 pub mod packets;
 
-pub const RX_PORT: &str = "5000";
-pub const TX_PORT: &str = "4000";
+pub const RX_PORT: &str = "29170";
+pub const TX_PORT: &str = "29172";
 pub const PAYLOAD_SIZE: usize = 960 * 2 * 2;
 const LEN_BYTES: usize = 2;
 
