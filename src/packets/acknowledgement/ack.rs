@@ -14,6 +14,17 @@ impl ACK {
         }
     }
 
+    // This can build an invalid ACK
+    pub fn from_bytes(bytes: [u8; 2]) -> Self {
+        Self {
+            content: u16::from_be_bytes(bytes),
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 2] {
+        self.content.to_be_bytes()
+    }
+
     pub fn flip_bit(&mut self, bit_index: u8) {
         if bit_index < 16 {
             self.content ^= 1u16 << bit_index;

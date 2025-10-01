@@ -74,6 +74,12 @@ impl Frame {
             content: complete_payload,
         }
     }
+
+    pub fn from_bytes(frame: &[u8]) -> Self {
+        Self {
+            content: frame.to_vec(),
+        }
+    }
     pub fn get_payload_and_checksum_and_sequence_byte(&self) -> (Vec<u8>, u32, SequenceByte) {
         let (payload, checksum_and_sequence_byte) = self
             .content
