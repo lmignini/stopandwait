@@ -12,7 +12,7 @@ pub const BIT_ERROR_PROBABILITY: f64 = 0.000001;
 pub const EOF_MARKER: &[u8] = b"__EOF__";
 pub const EOT_MARKER: &[u8] = b"__EOT__";
 pub const FILTER_LEVEL: LevelFilter = log::LevelFilter::Info;
-pub const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(10);
+pub const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(30);
 
 /*
 pub fn extend_payload_to_fixed_size(payload: &[u8]) -> [u8; PAYLOAD_SIZE] {

@@ -132,6 +132,19 @@ fn main() {
                 // Received duplicate frame
 
                 log::warn!("Received duplicate frame, discarding it silently...");
+
+                let parsed_payload = parse_len_prefixed_payload(&prefixed_payload);
+
+                if parsed_payload == EOT_MARKER {
+                    socket
+                        .set_read_timeout(Some(time::Duration::from_secs(1) + TIMEOUT_DURATION))
+                        .unwrap();
+
+                    if socket.recv(&mut buf).is_err() {
+                        log::info!("TX has stopped transmission, closing RX socket");
+                        break;
+                    }
+                }
             }
         } else {
             log::warn!("Received frame is NOT valid! - Doing nothing, waiting for timeout");
