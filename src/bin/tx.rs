@@ -1,3 +1,4 @@
+use local_ip_address::local_ip;
 use rfd::FileDialog;
 use std::{
     collections::VecDeque,
@@ -249,7 +250,7 @@ fn main() {
     let file_to_transfer = ask_for_input_file_and_return_it().expect("Unable to read input file");
 
     log::info!("File size is {} bytes", file_to_transfer.content.len());
-    let socket_ip_addr = match socket.local_addr().unwrap().ip() {
+    let socket_ip_addr = match local_ip().expect("Failed to get local IP") {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => unimplemented!(),
     };

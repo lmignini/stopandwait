@@ -1,4 +1,5 @@
 use clap::{Command, arg, value_parser};
+use local_ip_address::local_ip;
 use core::time;
 use rand::rngs::ThreadRng;
 use std::{
@@ -37,7 +38,7 @@ fn send_corrupted_ack(
     let ack_to_send = ack.simulate_errors_with_probability(bep, rng);
 
     buf_to_send.extend_from_slice(&ack_to_send.to_bytes());
-    let socket_ip_addr = match socket.local_addr().unwrap().ip() {
+    let socket_ip_addr = match local_ip().expect("Failed to get local IP") {
         IpAddr::V4(ip) => ip,
         IpAddr::V6(_) => unimplemented!(),
     };
