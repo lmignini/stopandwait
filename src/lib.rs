@@ -2,42 +2,39 @@ use log::LevelFilter;
 
 pub mod packets;
 
+// Free ports
 pub const RX_PORT: &str = "29170";
 pub const TX_PORT: &str = "29172";
-pub const PAYLOAD_SIZE: usize = 960 * 2 * 2;
-const LEN_BYTES: usize = 2;
 
-pub const MAX_DATA_SIZE: usize = PAYLOAD_SIZE - LEN_BYTES;
-pub const BIT_ERROR_PROBABILITY: f64 = 0.000001;
+const LEN_BYTES: usize = 2; // For safety measures, in case I need to add more bytes
+
+pub const SOT_PAYLOAD_LEN: usize = SOT_MARKER.len() + 4; // 4 bytes for IP address of TX
+pub const FRAME_OVERHEAD_LEN: usize = 4 + 1; // 4 byte checksum and 1 sequence byte
+pub const TX_PARAMETERS_PAYLOAD_LEN: usize = 2;
+
+// Start/End of file markers
+pub const SOF_MARKER: &[u8] = b"__SOF__";
 pub const EOF_MARKER: &[u8] = b"__EOF__";
-pub const EOT_MARKER: &[u8] = b"__EOT__";
-pub const FILTER_LEVEL: LevelFilter = log::LevelFilter::Info;
-pub const TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(30);
 
-/*
-pub fn extend_payload_to_fixed_size(payload: &[u8]) -> [u8; PAYLOAD_SIZE] {
-    let mut extended_payload: [u8; PAYLOAD_SIZE] = [0u8; PAYLOAD_SIZE];
-    if payload.len() <= PAYLOAD_SIZE {
-        for (i, byte) in payload.iter().enumerate() {
-            extended_payload[i] = *byte;
-        }
-    } else {
-        panic!("Payload is too big!");
-    }
-    extended_payload
-}
-*/
+// Start/End of transmission markers
+pub const SOT_MARKER: &[u8] = b"__SOT__";
+pub const EOT_MARKER: &[u8] = b"__EOT__";
+
+pub const FILTER_LEVEL: LevelFilter = log::LevelFilter::Info;
+
 // Length-prefixed payload builder (u16 BE length + data + zero padding)
-pub fn build_len_prefixed_payload(data: &[u8]) -> [u8; PAYLOAD_SIZE] {
-    assert!(
-        data.len() <= MAX_DATA_SIZE,
-        "Data is too big for length-prefixed payload"
-    );
-    let mut out = [0u8; PAYLOAD_SIZE];
+pub fn build_len_prefixed_payload(data: &[u8], size: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size as usize + 2);
     let len = data.len() as u16;
-    out[0..2].copy_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&len.to_be_bytes());
     // Copy rest of data to payload
-    out[2..2 + data.len()].copy_from_slice(data);
+    out.extend_from_slice(data);
+
+    while out.len() != ((size as usize) + 2) {
+        out.push(0);
+    }
+
+    assert!(out.len() == size as usize + 2);
     out
 }
 
@@ -46,6 +43,7 @@ pub fn parse_len_prefixed_payload(buf: &[u8]) -> &[u8] {
     assert!(buf.len() >= LEN_BYTES, "Payload too small");
     let len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
     let end = LEN_BYTES + len;
+
     assert!(end <= buf.len(), "Invalid length in frame payload");
     &buf[2..end]
 }
